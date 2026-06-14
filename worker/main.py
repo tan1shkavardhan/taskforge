@@ -6,7 +6,8 @@ import os
 from core.redis_client import get_redis
 from core.config import (
     QUEUE_NAME,
-    FAILED_QUEUE
+    FAILED_QUEUE,
+    BASE_RETRY_DELAY
 )
 
 from db.database import SessionLocal
@@ -67,10 +68,7 @@ def update_heartbeat(record, db):
 
     db.commit()
 
-    logging.debug(
-        f"Heartbeat updates for"
-        f"{record.display_id}"
-    )
+    
 
     logging.info(
     f"Heartbeat updated for {record.display_id}"
@@ -207,12 +205,17 @@ def worker_loop():
                             "retrying"
                         )
 
+                        backoff_seconds = BASE_RETRY_DELAY * (2 ** retry_count)
+
                         logging.warning(
                             f"[Worker {WORKER_ID}] "
                             f"Retrying {display_id} "
+                            f"in {backoff_seconds} s"
                             f"({task['retry_count']}/"
                             f"{max_retries})"
                         )
+
+                        time.sleep(backoff_seconds)
 
                         redis.lpush(
                             QUEUE_NAME,
