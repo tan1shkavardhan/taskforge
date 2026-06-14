@@ -3,6 +3,11 @@ import time
 import logging
 
 from core.redis_client import get_redis
+from core.config import (
+    QUEUE_NAME,
+    PROCESSING_TIMEOUT
+)
+
 from db.database import SessionLocal
 from db.models import TaskRecord
 
@@ -10,21 +15,24 @@ logging.basicConfig(level=logging.INFO)
 
 redis = get_redis()
 
-QUEUE_NAME = "task_queue"
-
-PROCESSING_TIMEOUT = 30  # seconds
-
 
 def recover_stuck_tasks():
+
+    logging.info(
+        "Recovery worker started"
+    )
 
     while True:
 
         db = SessionLocal()
 
         try:
+
             now = time.time()
 
-            processing_tasks = db.query(TaskRecord).filter(
+            processing_tasks = db.query(
+                TaskRecord
+            ).filter(
                 TaskRecord.status == "processing"
             ).all()
 
@@ -38,26 +46,32 @@ def recover_stuck_tasks():
                 if elapsed > PROCESSING_TIMEOUT:
 
                     logging.warning(
-                        f"Recovering stuck task "
+                        f"Recovering "
                         f"{task.display_id}"
                     )
 
-                    # rebuild task payload
                     task_data = {
                         "id": task.id,
                         "display_id": task.display_id,
                         "type": task.type,
-                        "payload": {},
+                        "payload": task.payload,
                         "retry_count": task.retry_count,
-                        "max_retries": task.max_retries
+                        "max_retries": task.max_retries,
+                        "created_at": task.created_at
                     }
 
-                    # update state
-                    task.status = "queued"
+                    # update DB state
+                    task.status = "recovering"
 
                     db.commit()
 
-                    # requeue
+                    # update redis state
+                    redis.set(
+                        f"task:{task.id}",
+                        "recovering"
+                    )
+
+                    # requeue task
                     redis.lpush(
                         QUEUE_NAME,
                         json.dumps(task_data)
@@ -65,11 +79,16 @@ def recover_stuck_tasks():
 
             time.sleep(10)
 
+        except Exception:
+
+            logging.exception(
+                "Recovery worker failure"
+            )
+
         finally:
+
             db.close()
 
 
 if __name__ == "__main__":
-    logging.info("Recovery worker started")
-
     recover_stuck_tasks()

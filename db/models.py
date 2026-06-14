@@ -5,21 +5,27 @@ from db.database import Base
 class TaskRecord(Base):
     __tablename__ = "tasks"
 
-    id = Column(String, primary_key=True, index=True)
-    display_id = Column(String, unique=True, index=True)
+    id = Column(String, primary_key=True, index=True,nullable=False)
+    display_id = Column(
+        String, 
+        unique=True, 
+        index=True,
+        nullable=False)
 
-    type = Column(String)
-    status = Column(String)
+    type = Column(String,nullable=False)
+    status = Column(String,nullable=False)
 
     retry_count = Column(Integer, default=0)
     max_retries = Column(Integer, default=3)
 
     result = Column(JSON, nullable=True)
+    payload= Column(JSON, nullable=True)
+    
     error = Column(String, nullable=True)
 
     duration_ms = Column(Float, nullable=True)
 
-    created_at = Column(Float)
+    created_at = Column(Float,nullable=False)
     completed_at = Column(Float, nullable=True)
 
     started_at = Column(Float, nullable=True)

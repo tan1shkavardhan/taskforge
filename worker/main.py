@@ -4,6 +4,11 @@ import logging
 import os
 
 from core.redis_client import get_redis
+from core.config import (
+    QUEUE_NAME,
+    FAILED_QUEUE
+)
+
 from db.database import SessionLocal
 from db.models import TaskRecord
 
@@ -11,25 +16,21 @@ logging.basicConfig(level=logging.INFO)
 
 redis = get_redis()
 
-QUEUE_NAME = "task_queue"
-FAILED_QUEUE = "failed_queue"
-
 WORKER_ID = os.getpid()
 
 
 def process_task(task):
-    """
-    Execute task logic based on task type.
-    """
-
-    logging.info(
-        f"[Worker {WORKER_ID}] "
-        f"Processing {task['display_id']} ({task['type']})"
-    )
 
     payload = task.get("payload", {})
 
+    logging.info(
+        f"[Worker {WORKER_ID}] "
+        f"Processing {task['display_id']} "
+        f"({task['type']})"
+    )
+
     if task["type"] == "print":
+
         return {
             "output": payload
         }
@@ -39,7 +40,9 @@ def process_task(task):
         seconds = payload.get("seconds", 1)
 
         if not isinstance(seconds, (int, float)):
-            raise ValueError("seconds must be numeric")
+            raise ValueError(
+                "seconds must be numeric"
+            )
 
         time.sleep(seconds)
 
@@ -56,8 +59,7 @@ def process_task(task):
 def worker_loop():
 
     logging.info(
-        f"[Worker {WORKER_ID}] "
-        f"Worker started (Memurai connected)"
+        f"[Worker {WORKER_ID}] Worker started"
     )
 
     while True:
@@ -65,44 +67,44 @@ def worker_loop():
         db = None
 
         try:
-            # Wait for next task
-            _, task_data = redis.brpop(QUEUE_NAME)
 
-            # Deserialize task
+            _, task_data = redis.brpop(
+                QUEUE_NAME
+            )
+
             task = json.loads(task_data)
 
             task_id = task["id"]
+
             display_id = task["display_id"]
 
-            # Create DB session
             db = SessionLocal()
 
-            # Fetch DB record
             record = db.query(TaskRecord).filter(
                 TaskRecord.id == task_id
             ).first()
 
             if not record:
                 raise ValueError(
-                    f"Task record not found for {display_id}"
+                    f"Missing DB record for {display_id}"
                 )
 
-            # Update status -> processing
             started_at = time.time()
 
-            redis.set(f"task:{task_id}", "processing")
-
+            # status -> processing
             record.status = "processing"
             record.started_at = started_at
 
             db.commit()
 
-            
+            redis.set(
+                f"task:{task_id}",
+                "processing"
+            )
 
-            # Execute task
+            # execute task
             result = process_task(task)
 
-            # End timing
             completed_at = time.time()
 
             duration_ms = round(
@@ -110,35 +112,24 @@ def worker_loop():
                 2
             )
 
-            # Store Redis metadata
-            redis.set(
-                f"task:{task_id}:result",
-                json.dumps(result)
-            )
-
-            redis.set(
-                f"task:{task_id}:duration_ms",
-                duration_ms
-            )
-
-            redis.set(
-                f"task:{task_id}:completed_at",
-                completed_at
-            )
-
-            # Update final Redis status
-            redis.set(
-                f"task:{task_id}",
-                "done"
-            )
-
-            # Update PostgreSQL record
+            # update db
             record.status = "done"
             record.result = result
             record.duration_ms = duration_ms
             record.completed_at = completed_at
 
             db.commit()
+
+            # redis metadata
+            redis.set(
+                f"task:{task_id}",
+                "done"
+            )
+
+            redis.set(
+                f"task:{task_id}:result",
+                json.dumps(result)
+            )
 
             logging.info(
                 f"[Worker {WORKER_ID}] "
@@ -148,25 +139,25 @@ def worker_loop():
 
         except Exception as e:
 
+            logging.exception(
+                f"[Worker {WORKER_ID}] Worker error"
+            )
+
             if 'task' in locals():
 
-                task_id = task["id"]
-                display_id = task["display_id"]
-
-                retry_count = task.get("retry_count", 0)
-                max_retries = task.get("max_retries", 3)
-
-                # Store Redis error
-                redis.set(
-                    f"task:{task_id}:error",
-                    str(e)
+                retry_count = task.get(
+                    "retry_count",
+                    0
                 )
 
-                # Ensure DB session exists
+                max_retries = task.get(
+                    "max_retries",
+                    3
+                )
+
                 if db is None:
                     db = SessionLocal()
 
-                # Fetch DB record
                 record = db.query(TaskRecord).filter(
                     TaskRecord.id == task_id
                 ).first()
@@ -175,48 +166,50 @@ def worker_loop():
 
                     record.error = str(e)
 
-                    logging.error(
-                        f"[Worker {WORKER_ID}] "
-                        f"Task {display_id} failed "
-                        f"(attempt {retry_count + 1}/{max_retries}): {e}"
-                    )
-
-                    # Retry logic
+                    # retry allowed
                     if retry_count < max_retries - 1:
 
-                        # Increment retry count
-                        task["retry_count"] = retry_count + 1
+                        task["retry_count"] += 1
 
-                        # Redis state
+                        record.status = "retrying"
+                        record.retry_count = task[
+                            "retry_count"
+                        ]
+
+                        db.commit()
+
                         redis.set(
                             f"task:{task_id}",
                             "retrying"
                         )
 
-                        # PostgreSQL state
-                        record.status = "retrying"
-                        record.retry_count = task["retry_count"]
-
-                        db.commit()
-
-                        logging.info(
+                        logging.warning(
                             f"[Worker {WORKER_ID}] "
                             f"Retrying {display_id} "
-                            f"({task['retry_count']}/{max_retries})"
+                            f"({task['retry_count']}/"
+                            f"{max_retries})"
                         )
 
-                        # Requeue task
                         redis.lpush(
                             QUEUE_NAME,
                             json.dumps(task)
                         )
 
                     else:
-                        # Permanent failure
+
+                        record.status = "failed"
+                        record.retry_count = retry_count
+
+                        db.commit()
 
                         redis.set(
                             f"task:{task_id}",
                             "failed"
+                        )
+
+                        redis.set(
+                            f"task:{task_id}:error",
+                            str(e)
                         )
 
                         redis.lpush(
@@ -224,24 +217,14 @@ def worker_loop():
                             task_data
                         )
 
-                        # PostgreSQL state
-                        record.status = "failed"
-                        record.retry_count = retry_count
-
-                        db.commit()
-
                         logging.error(
                             f"[Worker {WORKER_ID}] "
-                            f"Task {display_id} failed permanently"
+                            f"{display_id} "
+                            f"failed permanently"
                         )
 
-            else:
-                logging.exception(
-                    f"[Worker {WORKER_ID}] "
-                    f"Unhandled worker exception"
-                )
-
         finally:
+
             if db:
                 db.close()
 
