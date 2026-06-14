@@ -5,7 +5,7 @@ import logging
 from core.redis_client import get_redis
 from core.config import (
     QUEUE_NAME,
-    PROCESSING_TIMEOUT
+    PROCESSING_TIMEOUT 
 )
 
 from db.database import SessionLocal
@@ -38,10 +38,10 @@ def recover_stuck_tasks():
 
             for task in processing_tasks:
 
-                if not task.started_at:
+                if not task.last_heartbeat:
                     continue
 
-                elapsed = now - task.started_at
+                elapsed = now - task.last_heartbeat
 
                 if elapsed > PROCESSING_TIMEOUT:
 
@@ -61,14 +61,14 @@ def recover_stuck_tasks():
                     }
 
                     # update DB state
-                    task.status = "recovering"
+                    task.status = "queued"
 
                     db.commit()
 
                     # update redis state
                     redis.set(
                         f"task:{task.id}",
-                        "recovering"
+                        "queued"
                     )
 
                     # requeue task

@@ -19,7 +19,7 @@ redis = get_redis()
 WORKER_ID = os.getpid()
 
 
-def process_task(task):
+def process_task(task,record,db):
 
     payload = task.get("payload", {})
 
@@ -44,7 +44,13 @@ def process_task(task):
                 "seconds must be numeric"
             )
 
-        time.sleep(seconds)
+        remaining = seconds
+
+        while remaining > 0:
+            sleep_time = min(5,remaining)
+            time.sleep(sleep_time)
+            remaining -= sleep_time
+            update_heartbeat(record,db)
 
         return {
             "slept_for": seconds
@@ -55,6 +61,20 @@ def process_task(task):
             f"Unknown task type: {task['type']}"
         )
 
+def update_heartbeat(record, db):
+
+    record.last_heartbeat = time.time()
+
+    db.commit()
+
+    logging.debug(
+        f"Heartbeat updates for"
+        f"{record.display_id}"
+    )
+
+    logging.info(
+    f"Heartbeat updated for {record.display_id}"
+    )
 
 def worker_loop():
 
@@ -94,6 +114,7 @@ def worker_loop():
             # status -> processing
             record.status = "processing"
             record.started_at = started_at
+            record.last_heartbeat= started_at
 
             db.commit()
 
@@ -103,7 +124,10 @@ def worker_loop():
             )
 
             # execute task
-            result = process_task(task)
+            result = process_task(
+                task,
+                record,
+                db)
 
             completed_at = time.time()
 

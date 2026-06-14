@@ -26,6 +26,9 @@ class TaskRecord(Base):
     duration_ms = Column(Float, nullable=True)
 
     created_at = Column(Float,nullable=False)
-    completed_at = Column(Float, nullable=True)
 
     started_at = Column(Float, nullable=True)
+
+    last_heartbeat = Column(Float,nullable=True)
+
+    completed_at = Column(Float, nullable=True)
