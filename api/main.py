@@ -4,10 +4,14 @@ import json
 import ulid
 import logging
 import time
+import signal 
+
+from sqlalchemy import func
 
 from core.redis_client import get_redis
 from core.config import (
     QUEUE_NAME,
+    FAILED_QUEUE,
     MAX_RETRIES
 )
 
@@ -41,6 +45,66 @@ def health():
         "status": "healthy"
     }
 
+@app.get("/metrics")
+def metrics():
+
+    db = SessionLocal()
+
+    try:
+
+        queued = db.query(
+            func.count(TaskRecord.id)
+        ).filter(
+            TaskRecord.status == "queued"
+        ).scalar()
+
+        processing = db.query(
+            func.count(TaskRecord.id)
+        ).filter(
+            TaskRecord.status == "processing"
+        ).scalar()
+
+        retrying = db.query(
+            func.count(TaskRecord.id)
+        ).filter(
+            TaskRecord.status == "retrying"
+        ).scalar()
+
+        done = db.query(
+            func.count(TaskRecord.id)
+        ).filter(
+            TaskRecord.status == "done"
+        ).scalar()
+
+        failed = db.query(
+            func.count(TaskRecord.id)
+        ).filter(
+            TaskRecord.status == "failed"
+        ).scalar()
+
+        total = db.query(
+            func.count(TaskRecord.id)
+        ).scalar()
+
+        queue_length = redis.llen(QUEUE_NAME)
+
+        failed_queue_length = redis.llen(
+            FAILED_QUEUE
+        )
+
+        return {
+            "queued": queued,
+            "processing": processing,
+            "retrying": retrying,
+            "done": done,
+            "failed": failed,
+            "total": total,
+            "queue_length": queue_length,
+            "failed_queue_length": failed_queue_length
+        }
+
+    finally:
+        db.close()
 
 @app.post("/task")
 def create_task(task: Task):

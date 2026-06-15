@@ -2,7 +2,7 @@ import json
 import time
 import logging
 import os
-
+import signal 
 from core.redis_client import get_redis
 from core.config import (
     QUEUE_NAME,
@@ -12,55 +12,38 @@ from core.config import (
 
 from db.database import SessionLocal
 from db.models import TaskRecord
+from worker.handlers import TASK_HANDLERS
 
 logging.basicConfig(level=logging.INFO)
 
 redis = get_redis()
 
 WORKER_ID = os.getpid()
+RUNNING = True
 
-
-def process_task(task,record,db):
+def process_task(task, record, db):
 
     payload = task.get("payload", {})
+
+    task_type = task["type"]
 
     logging.info(
         f"[Worker {WORKER_ID}] "
         f"Processing {task['display_id']} "
-        f"({task['type']})"
+        f"({task_type})"
     )
 
-    if task["type"] == "print":
+    handler = TASK_HANDLERS.get(task_type)
 
-        return {
-            "output": payload
-        }
-
-    elif task["type"] == "sleep":
-
-        seconds = payload.get("seconds", 1)
-
-        if not isinstance(seconds, (int, float)):
-            raise ValueError(
-                "seconds must be numeric"
-            )
-
-        remaining = seconds
-
-        while remaining > 0:
-            sleep_time = min(5,remaining)
-            time.sleep(sleep_time)
-            remaining -= sleep_time
-            update_heartbeat(record,db)
-
-        return {
-            "slept_for": seconds
-        }
-
-    else:
+    if not handler:
         raise ValueError(
-            f"Unknown task type: {task['type']}"
+            f"Unknown task type: {task_type}"
         )
+
+    return handler(
+        payload,
+        lambda: update_heartbeat(record, db)
+    )
 
 def update_heartbeat(record, db):
 
@@ -74,21 +57,50 @@ def update_heartbeat(record, db):
     f"Heartbeat updated for {record.display_id}"
     )
 
+def shutdown_worker(signum, frame):
+
+    global RUNNING
+
+    logging.info(
+        f"[Worker {WORKER_ID}] "
+        f"Shutdown requested"
+    )
+
+    RUNNING = False
+
+
+signal.signal(
+    signal.SIGINT,
+    shutdown_worker
+)
+
+signal.signal(
+    signal.SIGTERM,
+    shutdown_worker
+)
+
 def worker_loop():
 
     logging.info(
         f"[Worker {WORKER_ID}] Worker started"
     )
 
-    while True:
+    while RUNNING:
 
         db = None
 
         try:
 
-            _, task_data = redis.brpop(
-                QUEUE_NAME
+            
+            result = redis.brpop(
+                QUEUE_NAME,
+                timeout=5
             )
+
+            if result is None:
+                continue
+
+            _, task_data = result
 
             task = json.loads(task_data)
 
@@ -249,11 +261,18 @@ def worker_loop():
                             f"{display_id} "
                             f"failed permanently"
                         )
+                
+                       
 
         finally:
 
             if db:
                 db.close()
+
+    logging.info(
+        f"[Worker {WORKER_ID}] "
+        f"Worker stopped gracefully"
+    )
 
 
 if __name__ == "__main__":
